@@ -129,6 +129,14 @@
   .cnt button:hover{color:var(--ink);border-color:var(--faint);}
   .cnt button:active{background:var(--hover);}
 
+  /* drag & drop */
+  .qitem{cursor:grab;}
+  .qitem:active{cursor:grabbing;}
+  .qitem.dragging{opacity:.45;}
+  .qitem.drop-above{box-shadow:0 -2.5px 0 0 var(--phr-ink);}
+  .qitem.drop-below{box-shadow:0 2.5px 0 0 var(--phr-ink);}
+  .ghead.drop-into{background:var(--hover);color:var(--ink);outline:1.5px dashed var(--faint);outline-offset:-2px;}
+
   /* ---------- main ---------- */
   .main{overflow-y:auto;min-height:0;}
   .main-inner{max-width:760px;margin:0 auto;padding:38px 40px 90px;}
@@ -785,13 +793,41 @@ function groupOf(a){return (a.group||'').trim()||UNGROUPED;}
 function allGroups(){
   const s=[];state.answers.forEach(a=>{const g=groupOf(a);if(g!==UNGROUPED&&g!==FAV&&!s.includes(g))s.push(g);});return s;
 }
+let dragId=null;
+function clearDropMarks(){
+  qlist.querySelectorAll('.drop-above,.drop-below,.drop-into').forEach(n=>n.classList.remove('drop-above','drop-below','drop-into'));
+}
+function moveCard(srcId,targetId,after){
+  if(!srcId||srcId===targetId)return;
+  const si=state.answers.findIndex(x=>x.id===srcId);if(si<0)return;
+  const [card]=state.answers.splice(si,1);
+  const ti=state.answers.findIndex(x=>x.id===targetId);
+  if(ti<0){state.answers.push(card);}
+  else{
+    card.group=(state.answers[ti].group||'').trim(); // dropping between cards adopts that group
+    state.answers.splice(after?ti+1:ti,0,card);
+  }
+  state.openGroup=groupOf(card);
+  save();renderAll();
+}
+function moveToGroup(srcId,gname){
+  if(!srcId)return;
+  const si=state.answers.findIndex(x=>x.id===srcId);if(si<0)return;
+  const [card]=state.answers.splice(si,1);
+  card.group=(gname===UNGROUPED?'':gname);
+  let last=-1;
+  state.answers.forEach((x,i)=>{if(groupOf(x)===groupOf(card))last=i;});
+  state.answers.splice(last+1,0,card); // land at the end of the target group
+  state.openGroup=groupOf(card);
+  save();renderAll();
+}
 function closeDrawer(){
   document.querySelector('.side').classList.remove('open');
   const lt=document.getElementById('listToggle');if(lt)lt.setAttribute('aria-expanded','false');
 }
 // One answer object can be rendered in two places (its own group and 收藏).
 // Both nodes point at the same object, so edits and counts are shared by construction.
-function buildCard(a){
+function buildCard(a,inFav){
   if(typeof a.reviews!=='number')a.reviews=0;
   const el=document.createElement('div');
   el.className='qitem'+(a.id===state.selectedId?' active':'');
@@ -823,6 +859,30 @@ function buildCard(a){
   });
   el.onclick=()=>{state.selectedId=a.id;save();renderAll();closeDrawer();};
   el.onkeydown=e=>{if((e.key==='Enter'||e.key===' ')&&e.target===el){e.preventDefault();el.click();}};
+  if(!inFav){
+    el.draggable=true;
+    el.addEventListener('dragstart',e=>{
+      dragId=a.id;el.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+      try{e.dataTransfer.setData('text/plain',a.id);}catch(_){}
+    });
+    el.addEventListener('dragend',()=>{dragId=null;el.classList.remove('dragging');clearDropMarks();});
+    el.addEventListener('dragover',e=>{
+      if(!dragId||dragId===a.id)return;
+      e.preventDefault();e.dataTransfer.dropEffect='move';
+      const r=el.getBoundingClientRect();
+      const below=(e.clientY-r.top)>r.height/2;
+      el.classList.toggle('drop-below',below);
+      el.classList.toggle('drop-above',!below);
+    });
+    el.addEventListener('dragleave',()=>{el.classList.remove('drop-above','drop-below');});
+    el.addEventListener('drop',e=>{
+      e.preventDefault();
+      const below=el.classList.contains('drop-below');
+      clearDropMarks();
+      moveCard(dragId,a.id,below);
+    });
+  }
   return el;
 }
 function renderSidebar(){
@@ -860,10 +920,15 @@ function renderSidebar(){
         if(state.openGroup===gname)state.openGroup=newName||null;
         save();renderAll();
       };
+      if(!sec.virtual){
+        gh.addEventListener('dragover',e=>{if(!dragId)return;e.preventDefault();e.dataTransfer.dropEffect='move';gh.classList.add('drop-into');});
+        gh.addEventListener('dragleave',()=>gh.classList.remove('drop-into'));
+        gh.addEventListener('drop',e=>{e.preventDefault();clearDropMarks();moveToGroup(dragId,gname);});
+      }
       qlist.appendChild(gh);
     }
     if(!isOpen)continue;
-    list.forEach(a=>qlist.appendChild(buildCard(a)));
+    list.forEach(a=>qlist.appendChild(buildCard(a,sec.virtual)));
   }
   qlist.scrollTop=scroll;
 }
@@ -1090,8 +1155,18 @@ document.getElementById('pasteBox').addEventListener('paste',()=>setTimeout(runP
    Import / export
    ============================================================ */
 document.getElementById('newBtn').onclick=()=>openEditor(null);
-document.getElementById('exportBtn').onclick=()=>{
-  const blob=new Blob([JSON.stringify({answers:state.answers},null,2)],{type:'application/json'});
+function blobToB64(blob){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]||'');r.onerror=()=>rej(r.error);r.readAsDataURL(blob);});}
+function b64ToBlob(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type:'audio/mpeg'});}
+document.getElementById('exportBtn').onclick=async()=>{
+  // bundle generated audio so a backup carries pronunciations too
+  const audio=[];
+  try{
+    const keys=await idbKeys(), vals=await idbAll(); // both come back in key order
+    for(let i=0;i<keys.length;i++){
+      if(vals[i]&&vals[i].size)audio.push({k:keys[i],d:await blobToB64(vals[i])});
+    }
+  }catch(e){}
+  const blob=new Blob([JSON.stringify({answers:state.answers,audio})],{type:'application/json'});
   const url=URL.createObjectURL(blob);const a=document.createElement('a');
   const d=new Date();const stamp=d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
   a.href=url;a.download='法语面试练习备份-'+stamp+'.json';a.click();URL.revokeObjectURL(url);
@@ -1100,7 +1175,7 @@ document.getElementById('importBtn').onclick=()=>document.getElementById('import
 document.getElementById('importFile').onchange=e=>{
   const file=e.target.files[0];if(!file)return;
   const rd=new FileReader();
-  rd.onload=()=>{
+  rd.onload=async()=>{
     try{
       const d=JSON.parse(rd.result);
       const imported=(d.answers||d||[]).filter(x=>x&&x.fullText!==undefined);
@@ -1110,7 +1185,16 @@ document.getElementById('importFile').onchange=e=>{
       }else{
         state.answers=imported.map(x=>({...x,id:uid()}));
       }
-      state.selectedId=state.answers[0].id;save();renderAll();
+      state.selectedId=state.answers[0].id;
+      // restore bundled audio into the local cache
+      if(Array.isArray(d.audio)&&d.audio.length){
+        let n=0;
+        for(const c of d.audio){
+          if(c&&c.k&&c.d){try{await idbPut(c.k,b64ToBlob(c.d));n++;}catch(e){}}
+        }
+        if(n)console.log('restored',n,'audio clips');
+      }
+      save();renderAll();
     }catch(err){alert('读取失败：文件不是有效的 JSON。');}
   };
   rd.readAsText(file);
