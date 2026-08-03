@@ -649,7 +649,7 @@ const DEM="(?:ce|cet|cette|ces)";
 const QUAL="(?:quel|quelle|quels|quelles)";
 const TOUT="(?:tout|toute|tous|toutes)";
 const FUNC={};
-"le la les l un une des du de d au aux a".split(" ").forEach(w=>FUNC[w]=DET);
+"le la les l un une des du de d au aux a à".split(" ").forEach(w=>FUNC[w]=DET);
 "mon ma mes ton ta tes son sa ses notre nos votre vos leur leurs".split(" ").forEach(w=>FUNC[w]=POSS);
 "ce cet cette ces".split(" ").forEach(w=>FUNC[w]=DEM);
 "quel quelle quels quelles".split(" ").forEach(w=>FUNC[w]=QUAL);
@@ -679,7 +679,10 @@ const SUFFIXES=["aient","erais","erait","eront","ement","aime","ions","iez","ent
 function coreFragment(tok){
   const f=fold(tok).replace(/[^a-z0-9]/g,'');
   if(!f)return null;
-  if(FUNC[f]) return FUNC[f]; // already a valid alternation; do NOT accent-flex a regex
+  // look up function words WITHOUT folding accents: là (adverb) must not be
+  // treated as la (article), nor dès as des
+  const exact=tok.toLowerCase().replace(/[\u2018\u2019\u02BC']/g,'');
+  if(FUNC[exact]) return FUNC[exact]; // already a valid alternation; do NOT accent-flex a regex
   if(f in IRREG_IDX){
     const forms=IRREG[IRREG_IDX[f]];
     return "(?:"+forms.map(x=>accFlex(x)).join("|")+")";
